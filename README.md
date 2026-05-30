@@ -4,6 +4,10 @@ A full-stack Solana DEX: atomic batch settlement on-chain + an order book matche
 
 **Live on devnet** | Program: [`8omCC2Q9SwwfRJQNkJ9UnFairpzHFkaWSeEd5nXjcooy`](https://explorer.solana.com/address/8omCC2Q9SwwfRJQNkJ9UnFairpzHFkaWSeEd5nXjcooy?cluster=devnet)
 
+**Live APIs:**
+- qidx indexer: `https://qidx-production.up.railway.app`
+- Matcher: `https://settlement-production-b250.up.railway.app`
+
 ---
 
 ## What it does
@@ -49,20 +53,21 @@ User (maker)             User (taker)
 
 Most DEXes settle one trade per transaction. `settle_batch` is atomic over N trades:
 
-| Approach | Trades/tx | CUs per trade |
+| Approach | Trades/tx | CUs used (measured) |
 |---|---|---|
-| One-by-one | 1 | ~5,000 |
-| settle_batch N=8 | 8 | ~1,800 |
-| settle_batch N=32 | 32 | ~460 |
+| One-by-one (anchor-spl) | 1 | 14,644 |
+| settle_batch + raw p-token CPI | 1 | 6,214 |
+| settle_batch N=8 (projected) | 8 | ~1,800/trade |
+| settle_batch N=32 (projected) | 32 | ~460/trade |
 
-10× compute efficiency at scale. Critical for liquidation engines and HFT market makers.
+**57% CU reduction** by replacing `anchor-spl::token::transfer` with raw CPI using the p-token (SIMD-0266) wire format directly. Measured live on devnet.
 
 ---
 
 ## Quick start
 
 ### Prerequisites
-- Node.js 18+
+- Node.js 20+
 - Rust + Anchor 1.0
 - Solana CLI with a devnet keypair
 
@@ -106,16 +111,16 @@ This creates mints and ATAs on devnet, mints tokens, places crossing orders, and
 ### qidx Indexer — `GET /tx/:signature`
 
 ```bash
-curl http://localhost:3000/tx/654as8QCLcQxdWog...
+curl https://qidx-production.up.railway.app/tx/55usB2Dp3A81YAriq1pwL4C5BHPU1MAHojESBNd8B3933Z6p1hxETqjgSKsQehbQpczd9zwUtpBE1aUTs1siEbVQ
 ```
 
 ```json
 {
-  "signature": "654as8QCLcQxdWog...",
+  "signature": "55usB2Dp...",
   "slot": 465788293,
   "timestamp": 1780081837,
   "fee": 5000,
-  "compute_units_used": 14644,
+  "compute_units_used": 6214,
   "instructions": [
     {
       "instruction": "settle_batch",
@@ -134,37 +139,31 @@ curl http://localhost:3000/tx/654as8QCLcQxdWog...
     }
   ],
   "token_balance_changes": [
-    { "account": "5p9jHDeYK...", "mint": "84he3Lph...", "change": "-1000000", ... },
-    { "account": "CoGs7NHW...", "mint": "84he3Lph...", "change": "1000000", ... }
+    { "account": "5p9jHDeYK...", "mint": "84he3Lph...", "change": "-1000000" },
+    { "account": "CoGs7NHW...", "mint": "84he3Lph...", "change": "1000000" }
   ]
 }
 ```
 
 ### Matcher — `POST /order`
 
-```json
-{
-  "side": "buy",
-  "baseMint": "<mint pubkey>",
-  "quoteMint": "<mint pubkey>",
-  "baseAmount": "1000000",
-  "quoteAmount": "500000",
-  "makerBaseAccount": "<your base ATA>",
-  "makerQuoteAccount": "<your quote ATA>"
-}
-```
-
-Response (on match):
-```json
-{
-  "order": { "status": "filled", ... },
-  "matched": [{ "baseAmount": "1000000", "quoteAmount": "500000", ... }],
-  "settlementSignature": "654as8QC..."
-}
+```bash
+curl -X POST https://settlement-production-b250.up.railway.app/order \
+  -H "Content-Type: application/json" \
+  -d '{
+    "side": "sell",
+    "baseMint": "<mint>",
+    "quoteMint": "<mint>",
+    "baseAmount": "1000000",
+    "quoteAmount": "500000",
+    "makerBaseAccount": "<ATA>",
+    "makerQuoteAccount": "<ATA>"
+  }'
 ```
 
 **`GET /orderbook`** — Open bids/asks  
-**`GET /trades`** — Matched trade history
+**`GET /trades`** — Matched trade history  
+**`GET /health`** — Engine pubkey, program, cluster
 
 ---
 
@@ -174,25 +173,47 @@ Response (on match):
 pub fn settle_batch(ctx: Context<SettleBatch>, trades: Vec<Trade>) -> Result<()>
 
 pub struct Trade {
-    pub base_amount: u64,   // maker → taker
-    pub quote_amount: u64,  // taker → maker
+    pub base_amount: u64,   // base tokens: maker → taker
+    pub quote_amount: u64,  // quote tokens: taker → maker
 }
 ```
 
 **Remaining accounts per trade** (4 × N):
-1. `maker_base_account` — maker's base token ATA (maker sells this)
-2. `taker_base_account` — taker's base token ATA (taker receives this)
-3. `taker_quote_account` — taker's quote token ATA (taker pays this)
-4. `maker_quote_account` — maker's quote token ATA (maker receives this)
+1. `maker_base_account` — maker sells this
+2. `taker_base_account` — taker receives this
+3. `taker_quote_account` — taker pays this
+4. `maker_quote_account` — maker receives this
 
-**On-chain validations:** batch not empty, ≤32 trades, amounts > 0, account count matches.
+**On-chain validations:** batch not empty, ≤32 trades, amounts > 0, account count matches, token program must be SPL Token (`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`).
+
+### Why raw CPI over anchor-spl
+
+`anchor-spl::token::transfer` allocates a `CpiContext` struct on every call. We build the 9-byte SPL Token Transfer instruction by hand instead:
+
+```
+[0]     u8   discriminator = 3
+[1..8]  u64  amount (little-endian)
+```
+
+Then call `solana_program::invoke` directly. Same p-token wire format, zero framework overhead. **Result: 14,644 → 6,214 CUs (-57%) measured on devnet.**
+
+---
+
+## Decentralisation tradeoff
+
+| Component | Decentralised? |
+|---|---|
+| Settlement (on-chain) | ✅ Yes — trustless, atomic |
+| Matching (off-chain) | ❌ No — centralised server |
+
+This is the standard CLOB (centralised limit order book with on-chain settlement) architecture used by dYdX, Drift, and early Serum. The trust assumption is on the matcher, not the settlement.
 
 ---
 
 ## Live proof
 
 Settlement transaction on devnet:  
-[`654as8QCLcQxdWogXH9HPonZ2k1RR83NkAopRvzVU8Y4KVd7kEEQfTmdaLphBMxqiRJ1beXM8BuW1qPxEMSCJKP5`](https://explorer.solana.com/tx/654as8QCLcQxdWogXH9HPonZ2k1RR83NkAopRvzVU8Y4KVd7kEEQfTmdaLphBMxqiRJ1beXM8BuW1qPxEMSCJKP5?cluster=devnet)
+[`55usB2Dp3A81YAriq1pwL4C5BHPU1MAHojESBNd8B3933Z6p1hxETqjgSKsQehbQpczd9zwUtpBE1aUTs1siEbVQ`](https://explorer.solana.com/tx/55usB2Dp3A81YAriq1pwL4C5BHPU1MAHojESBNd8B3933Z6p1hxETqjgSKsQehcQpczd9zwUtpBE1aUTs1siEbVQ?cluster=devnet)
 
 Balance changes confirmed:
 - Maker: −1,000,000 base, +500,000 quote
