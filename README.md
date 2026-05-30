@@ -213,7 +213,7 @@ This is the standard CLOB (centralised limit order book with on-chain settlement
 ## Live proof
 
 Settlement transaction on devnet:  
-[`55usB2Dp3A81YAriq1pwL4C5BHPU1MAHojESBNd8B3933Z6p1hxETqjgSKsQehbQpczd9zwUtpBE1aUTs1siEbVQ`](https://explorer.solana.com/tx/55usB2Dp3A81YAriq1pwL4C5BHPU1MAHojESBNd8B3933Z6p1hxETqjgSKsQehcQpczd9zwUtpBE1aUTs1siEbVQ?cluster=devnet)
+[`55usB2Dp3A81YAriq1pwL4C5BHPU1MAHojESBNd8B3933Z6p1hxETqjgSKsQehbQpczd9zwUtpBE1aUTs1siEbVQ`](https://explorer.solana.com/tx/55usB2Dp3A81YAriq1pwL4C5BHPU1MAHojESBNd8B3933Z6p1hxETqjgSKsQehbQpczd9zwUtpBE1aUTs1siEbVQ?cluster=devnet)
 
 Balance changes confirmed:
 - Maker: −1,000,000 base, +500,000 quote
