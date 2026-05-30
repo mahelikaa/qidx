@@ -1,6 +1,8 @@
 # qidx — DEX Settlement Engine
 
-A full-stack Solana DEX: atomic batch settlement on-chain + an order book matcher + a transaction indexer.
+Batch settlement is the core primitive that perp DEXes like dYdX and Drift are built on. This is that primitive, implemented natively on Solana.
+
+A full-stack settlement engine: atomic batch settlement on-chain + an order book matcher + a transaction indexer.
 
 **Live on devnet** | Program: [`8omCC2Q9SwwfRJQNkJ9UnFairpzHFkaWSeEd5nXjcooy`](https://explorer.solana.com/address/8omCC2Q9SwwfRJQNkJ9UnFairpzHFkaWSeEd5nXjcooy?cluster=devnet)
 
@@ -53,14 +55,14 @@ User (maker)             User (taker)
 
 Most DEXes settle one trade per transaction. `settle_batch` is atomic over N trades:
 
-| Approach | Trades/tx | CUs used (measured) |
-|---|---|---|
-| One-by-one (anchor-spl) | 1 | 14,644 |
-| settle_batch + raw p-token CPI | 1 | 6,214 |
-| settle_batch N=8 (projected) | 8 | ~1,800/trade |
-| settle_batch N=32 (projected) | 32 | ~460/trade |
+| Approach | Trades/tx | Total CUs | CUs/trade |
+|---|---|---|---|
+| One-by-one (anchor-spl) | 1 | 14,644 | 14,644 |
+| settle_batch N=1 (raw p-token CPI) | 1 | 6,214 | 6,214 |
+| settle_batch N=4 (measured) | 4 | 19,381 | 4,845 |
+| settle_batch N=32 (projected) | 32 | ~55,000 | ~1,700 |
 
-**57% CU reduction** by replacing `anchor-spl::token::transfer` with raw CPI using the p-token (SIMD-0266) wire format directly. Measured live on devnet.
+All numbers measured live on devnet. **57% CU reduction at N=1** by replacing `anchor-spl::token::transfer` with raw CPI using the p-token (SIMD-0266) wire format. At N=4, cost per trade drops to 4,845 CUs — the batch overhead amortises across trades.
 
 ---
 
@@ -212,12 +214,13 @@ This is the standard CLOB (centralised limit order book with on-chain settlement
 
 ## Live proof
 
-Settlement transaction on devnet:  
-[`55usB2Dp3A81YAriq1pwL4C5BHPU1MAHojESBNd8B3933Z6p1hxETqjgSKsQehbQpczd9zwUtpBE1aUTs1siEbVQ`](https://explorer.solana.com/tx/55usB2Dp3A81YAriq1pwL4C5BHPU1MAHojESBNd8B3933Z6p1hxETqjgSKsQehbQpczd9zwUtpBE1aUTs1siEbVQ?cluster=devnet)
+**N=4 batch settlement** — 4 trades, 1 transaction, 19,381 CUs, 16 balance changes:  
+[`sP4GKmvSFtUh4CmxgV8QRBSGTapeF9SnUDgZttenu3mkiRzEra4GhEEs8QExjkEYT6d4Vk7SCuQpYGfhHFvAjjY`](https://explorer.solana.com/tx/sP4GKmvSFtUh4CmxgV8QRBSGTapeF9SnUDgZttenu3mkiRzEra4GhEEs8QExjkEYT6d4Vk7SCuQpYGfhHFvAjjY?cluster=devnet)
 
-Balance changes confirmed:
-- Maker: −1,000,000 base, +500,000 quote
-- Taker: +1,000,000 base, −500,000 quote
+Decoded by qidx:  
+[`https://qidx-production.up.railway.app/tx/sP4GKmvSFtUh4CmxgV8QRBSGTapeF9SnUDgZttenu3mkiRzEra4GhEEs8QExjkEYT6d4Vk7SCuQpYGfhHFvAjjY`](https://qidx-production.up.railway.app/tx/sP4GKmvSFtUh4CmxgV8QRBSGTapeF9SnUDgZttenu3mkiRzEra4GhEEs8QExjkEYT6d4Vk7SCuQpYGfhHFvAjjY)
+
+All 4 pairs confirmed: maker −base +quote, taker +base −quote.
 
 ---
 
